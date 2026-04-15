@@ -10,12 +10,14 @@
     <main class="page">
       <section class="hero">
         <p class="eyebrow">Codex Local Usage</p>
-        <h1>Analyze Codex usage on this machine and estimate the right plan.</h1>
+        <h1>Analyze Codex usage across your machines and estimate the right plan.</h1>
         <p class="lede">
-          This dashboard reads the local Codex CLI history on this machine, aggregates sessions,
-          prompts, tokens, and active days over recent months, and suggests the most sensible plan
-          based on your actual usage pattern.
+          This dashboard currently reads local Codex CLI history from one machine, aggregates
+          sessions, prompts, tokens, and active days over recent months, and suggests the most
+          sensible plan based on your actual usage pattern.
         </p>
+        <p class="hint hero-machine">Current machine: <strong id="machine-name">Loading...</strong></p>
+        <p class="hint hero-machine">Included machines: <strong id="machine-list">Loading...</strong></p>
       </section>
 
       <section class="controls card">

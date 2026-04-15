@@ -12,6 +12,9 @@ const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const LOCAL_STATE_DB = path.join(CODEX_HOME, "state_5.sqlite");
 const LOCAL_HISTORY_JSONL = path.join(CODEX_HOME, "history.jsonl");
 const LOCAL_CONFIG_TOML = path.join(CODEX_HOME, "config.toml");
+const IMPORT_SNAPSHOT_ZIP =
+  process.env.CODEX_SNAPSHOT_ZIP ||
+  "/mnt/c/Users/HenriqueCosta/Downloads/codex-usage-active-data-sources-20260415-131917.zip";
 const MODEL_PRICING = {
   "gpt-5.4": {
     inputPerMillionUsd: 2.5,
@@ -405,11 +408,11 @@ function recommendPlan(months) {
 async function buildLocalReport(monthsBack) {
   const configuredModel = getConfiguredModel();
   const pythonScript = `
-import json, sqlite3, sys
+import json, sqlite3, sys, os, zipfile, tempfile, shutil
 from collections import defaultdict
 from datetime import datetime, timezone
 
-db_path, history_path, months_back = sys.argv[1], sys.argv[2], int(sys.argv[3])
+db_path, history_path, import_zip_path, months_back = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
 now = datetime.now(timezone.utc)
 start_year = now.year
 start_month = now.month - months_back + 1
@@ -419,26 +422,19 @@ while start_month <= 0:
 start = datetime(start_year, start_month, 1, tzinfo=timezone.utc)
 start_ts = int(start.timestamp())
 
-months = {}
-day_activity = defaultdict(int)
-all_cwds = set()
-providers = set()
-session_ids = set()
+machine_months = defaultdict(dict)
+machine_day_activity = defaultdict(set)
+machine_projects = defaultdict(set)
+machine_providers = defaultdict(set)
+machine_sessions = defaultdict(set)
+seen_thread_ids = set()
+seen_history_events = set()
 
 def month_key(ts):
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m")
 
-conn = sqlite3.connect(db_path)
-cur = conn.cursor()
-cur.execute("""
-    SELECT id, created_at, updated_at, source, model_provider, cwd, title, COALESCE(tokens_used, 0)
-    FROM threads
-    WHERE created_at >= ?
-    ORDER BY created_at
-""", (start_ts,))
-for thread_id, created_at, updated_at, source, model_provider, cwd, title, tokens_used in cur.fetchall():
-    key = month_key(created_at)
-    month = months.setdefault(key, {
+def ensure_month(machine_name, key):
+    month = machine_months[machine_name].setdefault(key, {
         "month": key,
         "sessions": 0,
         "requests": 0,
@@ -448,58 +444,166 @@ for thread_id, created_at, updated_at, source, model_provider, cwd, title, token
         "projects": set(),
         "sampleTitles": []
     })
-    month["sessions"] += 1
-    month["tokensUsed"] += int(tokens_used or 0)
-    if model_provider:
-        month["models"].add(model_provider)
-        providers.add(model_provider)
-    if cwd:
-        month["projects"].add(cwd)
-        all_cwds.add(cwd)
-    if title and len(month["sampleTitles"]) < 3:
-        month["sampleTitles"].append(title[:140])
-    day = datetime.fromtimestamp(created_at, timezone.utc).strftime("%Y-%m-%d")
-    month["activeDays"].add(day)
-    day_activity[day] += 1
-    session_ids.add(thread_id)
-conn.close()
+    return month
 
-try:
-    with open(history_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
+def load_machine(machine_name, local_db_path, local_history_path):
+    if os.path.exists(local_db_path):
+        conn = sqlite3.connect(local_db_path)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, created_at, updated_at, source, model_provider, cwd, title, COALESCE(tokens_used, 0)
+            FROM threads
+            WHERE created_at >= ?
+            ORDER BY created_at
+        """, (start_ts,))
+        for thread_id, created_at, updated_at, source, model_provider, cwd, title, tokens_used in cur.fetchall():
+            if thread_id in seen_thread_ids:
                 continue
-            row = json.loads(line)
-            ts = int(row.get("ts", 0))
-            if ts < start_ts:
-                continue
-            key = month_key(ts)
-            month = months.setdefault(key, {
-                "month": key,
-                "sessions": 0,
-                "requests": 0,
-                "tokensUsed": 0,
-                "activeDays": set(),
-                "models": set(),
-                "projects": set(),
-                "sampleTitles": []
-            })
-            month["requests"] += 1
-            day = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
+            seen_thread_ids.add(thread_id)
+            key = month_key(created_at)
+            month = ensure_month(machine_name, key)
+            month["sessions"] += 1
+            month["tokensUsed"] += int(tokens_used or 0)
+            if model_provider:
+                month["models"].add(model_provider)
+                machine_providers[machine_name].add(model_provider)
+            if cwd:
+                month["projects"].add(cwd)
+                machine_projects[machine_name].add(cwd)
+            if title and len(month["sampleTitles"]) < 3:
+                month["sampleTitles"].append(title[:140])
+            day = datetime.fromtimestamp(created_at, timezone.utc).strftime("%Y-%m-%d")
             month["activeDays"].add(day)
-            day_activity[day] += 0
-except FileNotFoundError:
-    pass
+            machine_day_activity[machine_name].add(day)
+            machine_sessions[machine_name].add(thread_id)
+        conn.close()
+
+    if os.path.exists(local_history_path):
+        with open(local_history_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                ts = int(row.get("ts", 0))
+                if ts < start_ts:
+                    continue
+                event_key = (
+                    row.get("session_id", ""),
+                    ts,
+                    row.get("text", "")
+                )
+                if event_key in seen_history_events:
+                    continue
+                seen_history_events.add(event_key)
+                key = month_key(ts)
+                month = ensure_month(machine_name, key)
+                month["requests"] += 1
+                day = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
+                month["activeDays"].add(day)
+                machine_day_activity[machine_name].add(day)
+
+load_machine(os.uname().nodename, db_path, history_path)
+
+if import_zip_path and os.path.exists(import_zip_path):
+    temp_root = tempfile.mkdtemp(prefix="codex-usage-import-")
+    try:
+        with zipfile.ZipFile(import_zip_path, "r") as zf:
+            names = zf.namelist()
+            machine_dirs = sorted({
+                name.split("/")[1]
+                for name in names
+                if name.startswith("codex-usage-requested/") and len(name.split("/")) > 2
+            })
+            for machine_dir in machine_dirs:
+                db_member = f"codex-usage-requested/{machine_dir}/state_5.sqlite"
+                history_member = f"codex-usage-requested/{machine_dir}/history.jsonl"
+                if db_member not in names and history_member not in names:
+                    continue
+                machine_temp_dir = os.path.join(temp_root, machine_dir)
+                os.makedirs(machine_temp_dir, exist_ok=True)
+                db_file = os.path.join(machine_temp_dir, "state_5.sqlite")
+                history_file = os.path.join(machine_temp_dir, "history.jsonl")
+                if db_member in names:
+                    with zf.open(db_member) as src, open(db_file, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                if history_member in names:
+                    with zf.open(history_member) as src, open(history_file, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                load_machine(machine_dir, db_file, history_file)
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+aggregate_months = {}
+aggregate_projects = set()
+aggregate_providers = set()
+aggregate_active_days = set()
+aggregate_session_ids = set()
+machines = []
+
+for machine_name, months in machine_months.items():
+    machine_entries = []
+    for key, month in months.items():
+        machine_entries.append({
+            "month": month["month"],
+            "sessions": month["sessions"],
+            "requests": month["requests"],
+            "inputTokens": 0,
+            "outputTokens": month["tokensUsed"],
+            "cachedTokens": 0,
+            "totalCostUsd": 0,
+            "models": sorted(month["models"]),
+            "projects": sorted(month["projects"]),
+            "activeDays": len(month["activeDays"]),
+            "sampleTitles": month["sampleTitles"]
+        })
+
+        agg = aggregate_months.setdefault(key, {
+            "month": key,
+            "sessions": 0,
+            "requests": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cachedTokens": 0,
+            "totalCostUsd": 0,
+            "models": set(),
+            "projects": set(),
+            "activeDays": set(),
+            "sampleTitles": []
+        })
+        agg["sessions"] += month["sessions"]
+        agg["requests"] += month["requests"]
+        agg["outputTokens"] += month["tokensUsed"]
+        agg["models"].update(month["models"])
+        agg["projects"].update(month["projects"])
+        agg["activeDays"].update(month["activeDays"])
+        for title in month["sampleTitles"]:
+            if len(agg["sampleTitles"]) < 5 and title not in agg["sampleTitles"]:
+                agg["sampleTitles"].append(title)
+
+    machines.append({
+        "machine": machine_name,
+        "months": sorted(machine_entries, key=lambda item: item["month"]),
+        "totals": {
+            "distinctProjects": sorted(machine_projects[machine_name]),
+            "providers": sorted(machine_providers[machine_name]),
+            "sessionCount": len(machine_sessions[machine_name]),
+            "activeDays": len(machine_day_activity[machine_name])
+        }
+    })
+    aggregate_projects.update(machine_projects[machine_name])
+    aggregate_providers.update(machine_providers[machine_name])
+    aggregate_active_days.update(machine_day_activity[machine_name])
+    aggregate_session_ids.update({f"{machine_name}:{x}" for x in machine_sessions[machine_name]})
 
 result_months = []
-for month in months.values():
+for key, month in aggregate_months.items():
     result_months.append({
         "month": month["month"],
         "sessions": month["sessions"],
         "requests": month["requests"],
         "inputTokens": 0,
-        "outputTokens": month["tokensUsed"],
+        "outputTokens": month["outputTokens"],
         "cachedTokens": 0,
         "totalCostUsd": 0,
         "models": sorted(month["models"]),
@@ -508,18 +612,28 @@ for month in months.values():
         "sampleTitles": month["sampleTitles"]
     })
 
+machines = sorted(machines, key=lambda item: item["machine"])
+
 print(json.dumps({
+    "machine": os.uname().nodename,
+    "machines": machines,
     "months": sorted(result_months, key=lambda item: item["month"]),
     "totals": {
-        "distinctProjects": sorted(all_cwds),
-        "providers": sorted(providers),
-        "sessionCount": len(session_ids),
-        "activeDays": len(day_activity)
+        "distinctProjects": sorted(aggregate_projects),
+        "providers": sorted(aggregate_providers),
+        "sessionCount": len(aggregate_session_ids),
+        "activeDays": len(aggregate_active_days),
+        "machineCount": len(machines)
     }
 }))
 `;
 
-  const localData = await runPythonJson(pythonScript, [LOCAL_STATE_DB, LOCAL_HISTORY_JSONL, String(monthsBack)]);
+  const localData = await runPythonJson(pythonScript, [
+    LOCAL_STATE_DB,
+    LOCAL_HISTORY_JSONL,
+    fs.existsSync(IMPORT_SNAPSHOT_ZIP) ? IMPORT_SNAPSHOT_ZIP : "",
+    String(monthsBack)
+  ]);
   const monthRange = buildMonthRange(monthsBack);
   const monthMap = new Map(localData.months.map((month) => [month.month, month]));
   const months = monthRange.map(
@@ -542,6 +656,25 @@ print(json.dumps({
       return month;
     }
   );
+  const machines = (localData.machines || []).map((machine) => ({
+    ...machine,
+    months: monthRange.map(
+      (monthKey) =>
+        machine.months.find((month) => month.month === monthKey) || {
+          month: monthKey,
+          sessions: 0,
+          requests: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          cachedTokens: 0,
+          totalCostUsd: 0,
+          models: [],
+          projects: [],
+          activeDays: 0,
+          sampleTitles: []
+        }
+    )
+  }));
 
   const recommendation = recommendPlan(months);
   const totalObservedTokens = months.reduce((sum, month) => sum + (month.outputTokens || 0), 0);
@@ -549,8 +682,9 @@ print(json.dumps({
 
   return {
     generatedAt: new Date().toISOString(),
-    source: "local",
-    machine: os.hostname(),
+    source: "local+imported",
+    machine: localData.machine || os.hostname(),
+    machines,
     period: {
       monthsBack,
       start: fromMonthsBack(monthsBack).toISOString(),
@@ -562,7 +696,10 @@ print(json.dumps({
     totals: localData.totals,
     paygEstimate,
     notes: [
-      "This report uses local Codex files from this machine, mainly ~/.codex/state_5.sqlite and ~/.codex/history.jsonl.",
+      "This report combines local Codex files from the current machine with imported snapshot sources when available.",
+      fs.existsSync(IMPORT_SNAPSHOT_ZIP)
+        ? `Imported snapshot archive loaded from ${IMPORT_SNAPSHOT_ZIP}.`
+        : "No imported snapshot archive was found; the report currently reflects only the local machine.",
       "For ChatGPT subscription accounts, this local approach is the most reliable way to measure real Codex CLI usage without depending on organization-level API endpoints.",
       `The pay-as-you-go estimate is based on the current official ${configuredModel} pricing: US$ ${paygEstimate.pricing.inputPerMillionUsd.toFixed(2)}/1M input tokens, US$ ${paygEstimate.pricing.cachedInputPerMillionUsd.toFixed(2)}/1M cached input tokens, and US$ ${paygEstimate.pricing.outputPerMillionUsd.toFixed(2)}/1M output tokens.`,
       "Because this machine's local data does not safely separate input and output tokens, the dashboard shows three estimates: optimistic, midpoint, and conservative.",
