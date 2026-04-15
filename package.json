@@ -1,0 +1,9 @@
+{
+  "name": "codex-usage",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dashboard local para consolidar uso do Codex via OpenAI Usage API e sugerir a melhor assinatura.",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

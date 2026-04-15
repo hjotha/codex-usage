@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Codex Usage Analyzer</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero">
+        <p class="eyebrow">Codex Local Usage</p>
+        <h1>Analise o uso do Codex nesta maquina e estime seu plano ideal.</h1>
+        <p class="lede">
+          Este dashboard le o historico local do Codex CLI nesta maquina, soma sessoes, prompts,
+          tokens e dias ativos nos ultimos meses e sugere o plano mais adequado com base no seu
+          padrao real.
+        </p>
+      </section>
+
+      <section class="controls card">
+        <label for="months">Meses analisados</label>
+        <div class="controls-row">
+          <input id="months" type="number" min="1" max="24" value="6" />
+          <button id="load-report">Atualizar analise</button>
+        </div>
+        <p class="hint">
+          Este modo nao depende da API da OpenAI. Ele usa os arquivos locais em `~/.codex`.
+        </p>
+      </section>
+
+      <section id="status" class="status"></section>
+
+      <section id="summary" class="summary-grid"></section>
+
+      <section id="recommendation" class="card hidden"></section>
+
+      <section class="card hidden" id="months-section">
+        <div class="section-heading">
+          <h2>Uso mensal</h2>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Mes</th>
+                <th>Sessoes</th>
+                <th>Requests</th>
+                <th>Tokens</th>
+                <th>Dias ativos</th>
+                <th>Providers</th>
+              </tr>
+            </thead>
+            <tbody id="months-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card hidden" id="plans-section">
+        <div class="section-heading">
+          <h2>Comparacao de planos</h2>
+        </div>
+        <div id="plans-grid" class="plans-grid"></div>
+      </section>
+
+      <section class="card hidden" id="notes-section">
+        <div class="section-heading">
+          <h2>Notas</h2>
+        </div>
+        <ul id="notes-list" class="notes-list"></ul>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
