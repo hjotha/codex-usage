@@ -9,10 +9,13 @@
   <body>
     <main class="page">
       <section class="hero">
-        <p class="eyebrow">Codex Local Usage</p>
-        <h1>Analyze Codex usage and estimate the right plan.</h1>
+        <p class="eyebrow">Local AI Usage</p>
+        <div class="hero-title-row">
+          <h1>Analyze AI usage and estimate the right plan.</h1>
+          <div id="product-logo" class="product-logo"></div>
+        </div>
         <p class="lede">
-          This dashboard reads local Codex CLI history from this machine or imported snapshots,
+          This dashboard reads local AI assistant history from this machine or imported snapshots,
           aggregates sessions, prompts, tokens, and active days over recent months, and suggests
           the most sensible plan based on your actual usage pattern.
         </p>
@@ -21,6 +24,13 @@
       <section class="controls card">
         <label for="months">Analysis controls</label>
         <div class="controls-row">
+          <div class="control-group">
+            <span class="control-label">Product</span>
+            <select id="product-filter">
+              <option value="codex">Codex</option>
+              <option value="claude">Claude Code</option>
+            </select>
+          </div>
           <div class="control-group">
             <span class="control-label">Months</span>
             <input id="months" type="number" min="1" max="24" value="6" />
@@ -33,10 +43,7 @@
           </div>
           <button id="load-report">Refresh analysis</button>
         </div>
-        <p class="hint">
-          This mode does not depend on the OpenAI API. It uses local files in `~/.codex` or
-          imported snapshots in `/home/hjotha/codex-usage/data-snapshots`.
-        </p>
+        <p class="hint" id="hint-text"></p>
       </section>
 
       <section id="status" class="status"></section>
@@ -70,6 +77,10 @@
             <div id="payg-chart"></div>
           </article>
           <article class="chart-card">
+            <h3>Machine usage share</h3>
+            <div id="machines-pie-chart"></div>
+          </article>
+          <article class="chart-card">
             <h3>Machine share by tokens</h3>
             <div id="machines-chart"></div>
           </article>
@@ -87,10 +98,12 @@
                 <th>Month</th>
                 <th>Sessions</th>
                 <th>Requests</th>
-                <th>Tokens</th>
+                <th>Input tokens</th>
+                <th>Output tokens</th>
+                <th>Cache tokens</th>
                 <th>Estimated PAYG</th>
                 <th>Active days</th>
-                <th>Providers</th>
+                <th>Models</th>
               </tr>
             </thead>
             <tbody id="months-body"></tbody>
