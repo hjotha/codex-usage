@@ -12,9 +12,6 @@ const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const LOCAL_STATE_DB = path.join(CODEX_HOME, "state_5.sqlite");
 const LOCAL_HISTORY_JSONL = path.join(CODEX_HOME, "history.jsonl");
 const LOCAL_CONFIG_TOML = path.join(CODEX_HOME, "config.toml");
-const IMPORT_SNAPSHOT_ZIP =
-  process.env.CODEX_SNAPSHOT_ZIP ||
-  "/mnt/c/Users/HenriqueCosta/Downloads/codex-usage-active-data-sources-20260415-131917.zip";
 const MODEL_PRICING = {
   "gpt-5.4": {
     inputPerMillionUsd: 2.5,
@@ -22,6 +19,8 @@ const MODEL_PRICING = {
     outputPerMillionUsd: 15
   }
 };
+const SNAPSHOTS_DIR = process.env.SNAPSHOTS_DIR || path.join(__dirname, "data-snapshots");
+const ASSUME_TEAM_WORKSPACE = /^(1|true|yes)$/i.test(process.env.ASSUME_TEAM_WORKSPACE || "");
 
 const PLAN_PROFILES = [
   {
@@ -93,6 +92,15 @@ function sendFile(res, filePath) {
     res.writeHead(200, { "Content-Type": contentType });
     res.end(data);
   });
+}
+
+function fileExists(filePath) {
+  try {
+    fs.accessSync(filePath, fs.constants.R_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function toUnixSeconds(date) {
@@ -274,9 +282,9 @@ function average(numbers) {
   return numbers.reduce((sum, value) => sum + value, 0) / numbers.length;
 }
 
-function getConfiguredModel() {
+function getConfiguredModel(configPath = LOCAL_CONFIG_TOML) {
   try {
-    const config = fs.readFileSync(LOCAL_CONFIG_TOML, "utf8");
+    const config = fs.readFileSync(configPath, "utf8");
     const match = config.match(/^model\s*=\s*"([^"]+)"/m);
     return match ? match[1] : "gpt-5.4";
   } catch {
@@ -365,7 +373,10 @@ function recommendPlan(months) {
     const requestGap = Math.max(0, peakMonthlyRequests - plan.monthlyRequestsCeiling);
     const tokenPressure = peakMonthlyTokens > 0 ? peakMonthlyTokens / 1_000_000 : 0;
     const fixedCostPenalty = plan.monthlyPriceUsd > avgMonthlyCost * 1.5 ? 20 : 0;
-    const businessPenalty = plan.id === "business" && peakMonthlyRequests < 3000 ? 18 : 0;
+    const businessPenalty =
+      plan.id !== "business"
+        ? 0
+        : (ASSUME_TEAM_WORKSPACE ? 0 : 120) + (peakMonthlyRequests < 3000 ? 18 : 0);
     const score =
       costGap * 2 +
       requestGap / 40 +
@@ -397,6 +408,10 @@ function recommendPlan(months) {
     );
   }
 
+  if (!ASSUME_TEAM_WORKSPACE) {
+    rationale.push("Workspace or team plans receive an extra penalty in this heuristic by default.");
+  }
+
   return {
     recommendedPlanId: best.id,
     confidence: activeMonths.length >= 3 ? "medium" : "low",
@@ -406,13 +421,23 @@ function recommendPlan(months) {
 }
 
 async function buildLocalReport(monthsBack) {
-  const configuredModel = getConfiguredModel();
+  return buildSnapshotReportFromSource({
+    id: os.hostname(),
+    machine: os.hostname(),
+    dbPath: LOCAL_STATE_DB,
+    historyPath: LOCAL_HISTORY_JSONL,
+    configPath: LOCAL_CONFIG_TOML
+  }, monthsBack);
+}
+
+async function buildSnapshotReportFromSource(source, monthsBack) {
+  const configuredModel = getConfiguredModel(source.configPath);
   const pythonScript = `
-import json, sqlite3, sys, os, zipfile, tempfile, shutil
+import json, sqlite3, sys
 from collections import defaultdict
 from datetime import datetime, timezone
 
-db_path, history_path, import_zip_path, months_back = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+db_path, history_path, months_back, machine_name = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 now = datetime.now(timezone.utc)
 start_year = now.year
 start_month = now.month - months_back + 1
@@ -422,19 +447,26 @@ while start_month <= 0:
 start = datetime(start_year, start_month, 1, tzinfo=timezone.utc)
 start_ts = int(start.timestamp())
 
-machine_months = defaultdict(dict)
-machine_day_activity = defaultdict(set)
-machine_projects = defaultdict(set)
-machine_providers = defaultdict(set)
-machine_sessions = defaultdict(set)
-seen_thread_ids = set()
-seen_history_events = set()
+months = {}
+day_activity = defaultdict(int)
+all_cwds = set()
+providers = set()
+session_ids = set()
 
 def month_key(ts):
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m")
 
-def ensure_month(machine_name, key):
-    month = machine_months[machine_name].setdefault(key, {
+conn = sqlite3.connect(db_path)
+cur = conn.cursor()
+cur.execute("""
+    SELECT id, created_at, updated_at, source, model_provider, cwd, title, COALESCE(tokens_used, 0)
+    FROM threads
+    WHERE created_at >= ?
+    ORDER BY created_at
+""", (start_ts,))
+for thread_id, created_at, updated_at, source, model_provider, cwd, title, tokens_used in cur.fetchall():
+    key = month_key(created_at)
+    month = months.setdefault(key, {
         "month": key,
         "sessions": 0,
         "requests": 0,
@@ -444,195 +476,85 @@ def ensure_month(machine_name, key):
         "projects": set(),
         "sampleTitles": []
     })
-    return month
+    month["sessions"] += 1
+    month["tokensUsed"] += int(tokens_used or 0)
+    if model_provider:
+        month["models"].add(model_provider)
+        providers.add(model_provider)
+    if cwd:
+        month["projects"].add(cwd)
+        all_cwds.add(cwd)
+    if title and len(month["sampleTitles"]) < 3:
+        month["sampleTitles"].append(title[:140])
+    day = datetime.fromtimestamp(created_at, timezone.utc).strftime("%Y-%m-%d")
+    month["activeDays"].add(day)
+    day_activity[day] += 1
+    session_ids.add(f"{machine_name}:{thread_id}")
+conn.close()
 
-def load_machine(machine_name, local_db_path, local_history_path):
-    if os.path.exists(local_db_path):
-        conn = sqlite3.connect(local_db_path)
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT id, created_at, updated_at, source, model_provider, cwd, title, COALESCE(tokens_used, 0)
-            FROM threads
-            WHERE created_at >= ?
-            ORDER BY created_at
-        """, (start_ts,))
-        for thread_id, created_at, updated_at, source, model_provider, cwd, title, tokens_used in cur.fetchall():
-            if thread_id in seen_thread_ids:
+try:
+    with open(history_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
                 continue
-            seen_thread_ids.add(thread_id)
-            key = month_key(created_at)
-            month = ensure_month(machine_name, key)
-            month["sessions"] += 1
-            month["tokensUsed"] += int(tokens_used or 0)
-            if model_provider:
-                month["models"].add(model_provider)
-                machine_providers[machine_name].add(model_provider)
-            if cwd:
-                month["projects"].add(cwd)
-                machine_projects[machine_name].add(cwd)
-            if title and len(month["sampleTitles"]) < 3:
-                month["sampleTitles"].append(title[:140])
-            day = datetime.fromtimestamp(created_at, timezone.utc).strftime("%Y-%m-%d")
-            month["activeDays"].add(day)
-            machine_day_activity[machine_name].add(day)
-            machine_sessions[machine_name].add(thread_id)
-        conn.close()
-
-    if os.path.exists(local_history_path):
-        with open(local_history_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                row = json.loads(line)
-                ts = int(row.get("ts", 0))
-                if ts < start_ts:
-                    continue
-                event_key = (
-                    row.get("session_id", ""),
-                    ts,
-                    row.get("text", "")
-                )
-                if event_key in seen_history_events:
-                    continue
-                seen_history_events.add(event_key)
-                key = month_key(ts)
-                month = ensure_month(machine_name, key)
-                month["requests"] += 1
-                day = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
-                month["activeDays"].add(day)
-                machine_day_activity[machine_name].add(day)
-
-load_machine(os.uname().nodename, db_path, history_path)
-
-if import_zip_path and os.path.exists(import_zip_path):
-    temp_root = tempfile.mkdtemp(prefix="codex-usage-import-")
-    try:
-        with zipfile.ZipFile(import_zip_path, "r") as zf:
-            names = zf.namelist()
-            machine_dirs = sorted({
-                name.split("/")[1]
-                for name in names
-                if name.startswith("codex-usage-requested/") and len(name.split("/")) > 2
+            row = json.loads(line)
+            ts = int(row.get("ts", 0))
+            if ts < start_ts:
+                continue
+            key = month_key(ts)
+            month = months.setdefault(key, {
+                "month": key,
+                "sessions": 0,
+                "requests": 0,
+                "tokensUsed": 0,
+                "activeDays": set(),
+                "models": set(),
+                "projects": set(),
+                "sampleTitles": []
             })
-            for machine_dir in machine_dirs:
-                db_member = f"codex-usage-requested/{machine_dir}/state_5.sqlite"
-                history_member = f"codex-usage-requested/{machine_dir}/history.jsonl"
-                if db_member not in names and history_member not in names:
-                    continue
-                machine_temp_dir = os.path.join(temp_root, machine_dir)
-                os.makedirs(machine_temp_dir, exist_ok=True)
-                db_file = os.path.join(machine_temp_dir, "state_5.sqlite")
-                history_file = os.path.join(machine_temp_dir, "history.jsonl")
-                if db_member in names:
-                    with zf.open(db_member) as src, open(db_file, "wb") as dst:
-                        shutil.copyfileobj(src, dst)
-                if history_member in names:
-                    with zf.open(history_member) as src, open(history_file, "wb") as dst:
-                        shutil.copyfileobj(src, dst)
-                load_machine(machine_dir, db_file, history_file)
-    finally:
-        shutil.rmtree(temp_root, ignore_errors=True)
-
-aggregate_months = {}
-aggregate_projects = set()
-aggregate_providers = set()
-aggregate_active_days = set()
-aggregate_session_ids = set()
-machines = []
-
-for machine_name, months in machine_months.items():
-    machine_entries = []
-    for key, month in months.items():
-        machine_entries.append({
-            "month": month["month"],
-            "sessions": month["sessions"],
-            "requests": month["requests"],
-            "inputTokens": 0,
-            "outputTokens": month["tokensUsed"],
-            "cachedTokens": 0,
-            "totalCostUsd": 0,
-            "models": sorted(month["models"]),
-            "projects": sorted(month["projects"]),
-            "activeDays": len(month["activeDays"]),
-            "sampleTitles": month["sampleTitles"]
-        })
-
-        agg = aggregate_months.setdefault(key, {
-            "month": key,
-            "sessions": 0,
-            "requests": 0,
-            "inputTokens": 0,
-            "outputTokens": 0,
-            "cachedTokens": 0,
-            "totalCostUsd": 0,
-            "models": set(),
-            "projects": set(),
-            "activeDays": set(),
-            "sampleTitles": []
-        })
-        agg["sessions"] += month["sessions"]
-        agg["requests"] += month["requests"]
-        agg["outputTokens"] += month["tokensUsed"]
-        agg["models"].update(month["models"])
-        agg["projects"].update(month["projects"])
-        agg["activeDays"].update(month["activeDays"])
-        for title in month["sampleTitles"]:
-            if len(agg["sampleTitles"]) < 5 and title not in agg["sampleTitles"]:
-                agg["sampleTitles"].append(title)
-
-    machines.append({
-        "machine": machine_name,
-        "months": sorted(machine_entries, key=lambda item: item["month"]),
-        "totals": {
-            "distinctProjects": sorted(machine_projects[machine_name]),
-            "providers": sorted(machine_providers[machine_name]),
-            "sessionCount": len(machine_sessions[machine_name]),
-            "activeDays": len(machine_day_activity[machine_name])
-        }
-    })
-    aggregate_projects.update(machine_projects[machine_name])
-    aggregate_providers.update(machine_providers[machine_name])
-    aggregate_active_days.update(machine_day_activity[machine_name])
-    aggregate_session_ids.update({f"{machine_name}:{x}" for x in machine_sessions[machine_name]})
+            month["requests"] += 1
+            day = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
+            month["activeDays"].add(day)
+            day_activity[day] += 0
+except FileNotFoundError:
+    pass
 
 result_months = []
-for key, month in aggregate_months.items():
+for month in months.values():
     result_months.append({
         "month": month["month"],
         "sessions": month["sessions"],
         "requests": month["requests"],
         "inputTokens": 0,
-        "outputTokens": month["outputTokens"],
+        "outputTokens": month["tokensUsed"],
         "cachedTokens": 0,
         "totalCostUsd": 0,
         "models": sorted(month["models"]),
         "projects": sorted(month["projects"]),
         "activeDays": len(month["activeDays"]),
+        "activeDayKeys": sorted(month["activeDays"]),
         "sampleTitles": month["sampleTitles"]
     })
 
-machines = sorted(machines, key=lambda item: item["machine"])
-
 print(json.dumps({
-    "machine": os.uname().nodename,
-    "machines": machines,
+    "machine": machine_name,
     "months": sorted(result_months, key=lambda item: item["month"]),
     "totals": {
-        "distinctProjects": sorted(aggregate_projects),
-        "providers": sorted(aggregate_providers),
-        "sessionCount": len(aggregate_session_ids),
-        "activeDays": len(aggregate_active_days),
-        "machineCount": len(machines)
+        "distinctProjects": sorted(all_cwds),
+        "providers": sorted(providers),
+        "sessionCount": len(session_ids),
+        "activeDays": len(day_activity),
+        "activeDayKeys": sorted(day_activity.keys())
     }
 }))
 `;
 
   const localData = await runPythonJson(pythonScript, [
-    LOCAL_STATE_DB,
-    LOCAL_HISTORY_JSONL,
-    fs.existsSync(IMPORT_SNAPSHOT_ZIP) ? IMPORT_SNAPSHOT_ZIP : "",
-    String(monthsBack)
+    source.dbPath,
+    source.historyPath || "",
+    String(monthsBack),
+    source.machine
   ]);
   const monthRange = buildMonthRange(monthsBack);
   const monthMap = new Map(localData.months.map((month) => [month.month, month]));
@@ -650,31 +572,13 @@ print(json.dumps({
           models: [],
           projects: [],
           activeDays: 0,
+          activeDayKeys: [],
           sampleTitles: []
         };
       month.paygEstimate = estimatePaygCost(month.outputTokens || 0, configuredModel);
       return month;
     }
   );
-  const machines = (localData.machines || []).map((machine) => ({
-    ...machine,
-    months: monthRange.map(
-      (monthKey) =>
-        machine.months.find((month) => month.month === monthKey) || {
-          month: monthKey,
-          sessions: 0,
-          requests: 0,
-          inputTokens: 0,
-          outputTokens: 0,
-          cachedTokens: 0,
-          totalCostUsd: 0,
-          models: [],
-          projects: [],
-          activeDays: 0,
-          sampleTitles: []
-        }
-    )
-  }));
 
   const recommendation = recommendPlan(months);
   const totalObservedTokens = months.reduce((sum, month) => sum + (month.outputTokens || 0), 0);
@@ -682,9 +586,8 @@ print(json.dumps({
 
   return {
     generatedAt: new Date().toISOString(),
-    source: "local+imported",
-    machine: localData.machine || os.hostname(),
-    machines,
+    source: "local",
+    machine: source.machine,
     period: {
       monthsBack,
       start: fromMonthsBack(monthsBack).toISOString(),
@@ -696,16 +599,252 @@ print(json.dumps({
     totals: localData.totals,
     paygEstimate,
     notes: [
-      "This report combines local Codex files from the current machine with imported snapshot sources when available.",
-      fs.existsSync(IMPORT_SNAPSHOT_ZIP)
-        ? `Imported snapshot archive loaded from ${IMPORT_SNAPSHOT_ZIP}.`
-        : "No imported snapshot archive was found; the report currently reflects only the local machine.",
+      `This report uses local Codex files from ${source.machine}.`,
       "For ChatGPT subscription accounts, this local approach is the most reliable way to measure real Codex CLI usage without depending on organization-level API endpoints.",
       `The pay-as-you-go estimate is based on the current official ${configuredModel} pricing: US$ ${paygEstimate.pricing.inputPerMillionUsd.toFixed(2)}/1M input tokens, US$ ${paygEstimate.pricing.cachedInputPerMillionUsd.toFixed(2)}/1M cached input tokens, and US$ ${paygEstimate.pricing.outputPerMillionUsd.toFixed(2)}/1M output tokens.`,
       "Because this machine's local data does not safely separate input and output tokens, the dashboard shows three estimates: optimistic, midpoint, and conservative.",
       "As far as current public documentation shows, there is no official API to automatically fetch total Codex usage for a ChatGPT subscription across all machines and accounts."
     ]
   };
+}
+
+function listSnapshotSources() {
+  if (!fileExists(SNAPSHOTS_DIR)) {
+    return [];
+  }
+
+  return fs
+    .readdirSync(SNAPSHOTS_DIR, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => {
+      const dirPath = path.join(SNAPSHOTS_DIR, entry.name);
+      const dbPath = path.join(dirPath, "state_5.sqlite");
+      const historyPath = path.join(dirPath, "history.jsonl");
+      const statusPath = path.join(dirPath, "STATUS.txt");
+      const hasDatabase = fileExists(dbPath);
+      const hasHistory = fileExists(historyPath);
+      const status = fileExists(statusPath)
+        ? fs.readFileSync(statusPath, "utf-8").trim() || "status-unknown"
+        : "";
+      const configPath = path.join(dirPath, "config.toml");
+
+      return {
+        id: entry.name,
+        machine: entry.name,
+        dirPath,
+        dbPath,
+        historyPath,
+        configPath,
+        hasDatabase,
+        hasHistory,
+        available: hasDatabase,
+        status: hasDatabase ? "ok" : status || "missing-codex-data"
+      };
+    });
+}
+
+function mergeLocalReports(reports, monthsBack, unavailableSources = []) {
+  const monthMap = new Map();
+  const providers = new Set();
+  const distinctProjects = new Set();
+  const globalActiveDays = new Set();
+  const machines = [];
+  let sessionCount = 0;
+
+  for (const report of reports) {
+    machines.push({
+      machine: report.machine,
+      status: "ok",
+      sessions: report.months.reduce((sum, month) => sum + (month.sessions || 0), 0),
+      requests: report.months.reduce((sum, month) => sum + (month.requests || 0), 0),
+      tokens: report.months.reduce((sum, month) => sum + (month.outputTokens || 0), 0)
+    });
+
+    sessionCount += Number(report.totals?.sessionCount || 0);
+
+    for (const provider of report.totals?.providers || []) {
+      providers.add(provider);
+    }
+
+    for (const project of report.totals?.distinctProjects || []) {
+      distinctProjects.add(project);
+    }
+
+    for (const day of report.totals?.activeDayKeys || []) {
+      globalActiveDays.add(day);
+    }
+
+    for (const month of report.months) {
+      const target = monthMap.get(month.month) || {
+        month: month.month,
+        sessions: 0,
+        requests: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedTokens: 0,
+        totalCostUsd: 0,
+        models: new Set(),
+        projects: new Set(),
+        activeDayKeys: new Set(),
+        sampleTitles: [],
+        paygEstimate: {
+          optimisticUsd: 0,
+          midpointUsd: 0,
+          conservativeUsd: 0
+        }
+      };
+
+      target.sessions += Number(month.sessions || 0);
+      target.requests += Number(month.requests || 0);
+      target.inputTokens += Number(month.inputTokens || 0);
+      target.outputTokens += Number(month.outputTokens || 0);
+      target.cachedTokens += Number(month.cachedTokens || 0);
+      target.totalCostUsd += Number(month.totalCostUsd || 0);
+
+      for (const model of month.models || []) {
+        target.models.add(model);
+      }
+
+      for (const project of month.projects || []) {
+        target.projects.add(project);
+      }
+
+      for (const day of month.activeDayKeys || []) {
+        target.activeDayKeys.add(day);
+      }
+
+      target.paygEstimate.optimisticUsd += Number(month.paygEstimate?.optimisticUsd || 0);
+      target.paygEstimate.midpointUsd += Number(month.paygEstimate?.midpointUsd || 0);
+      target.paygEstimate.conservativeUsd += Number(month.paygEstimate?.conservativeUsd || 0);
+
+      for (const title of month.sampleTitles || []) {
+        if (target.sampleTitles.length >= 3) {
+          break;
+        }
+
+        if (!target.sampleTitles.includes(title)) {
+          target.sampleTitles.push(title);
+        }
+      }
+
+      monthMap.set(month.month, target);
+    }
+  }
+
+  const months = buildMonthRange(monthsBack).map((monthKey) => {
+    const month = monthMap.get(monthKey);
+
+    if (!month) {
+      return {
+        month: monthKey,
+        sessions: 0,
+        requests: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedTokens: 0,
+        totalCostUsd: 0,
+        models: [],
+        projects: [],
+        activeDays: 0,
+        activeDayKeys: [],
+        sampleTitles: [],
+        paygEstimate: {
+          optimisticUsd: 0,
+          midpointUsd: 0,
+          conservativeUsd: 0
+        }
+      };
+    }
+
+    return {
+      month: month.month,
+      sessions: month.sessions,
+      requests: month.requests,
+      inputTokens: month.inputTokens,
+      outputTokens: month.outputTokens,
+      cachedTokens: month.cachedTokens,
+      totalCostUsd: Number(month.totalCostUsd.toFixed(4)),
+      models: Array.from(month.models).sort(),
+      projects: Array.from(month.projects).sort(),
+      activeDays: month.activeDayKeys.size,
+      activeDayKeys: Array.from(month.activeDayKeys).sort(),
+      sampleTitles: month.sampleTitles,
+      paygEstimate: {
+        optimisticUsd: Number(month.paygEstimate.optimisticUsd.toFixed(4)),
+        midpointUsd: Number(month.paygEstimate.midpointUsd.toFixed(4)),
+        conservativeUsd: Number(month.paygEstimate.conservativeUsd.toFixed(4))
+      }
+    };
+  });
+
+  const recommendation = recommendPlan(months);
+  const unavailable = unavailableSources.map((source) => ({
+    machine: source.machine,
+    status: source.status
+  }));
+  const paygEstimate = months.reduce(
+    (totals, month) => {
+      totals.optimisticUsd += Number(month.paygEstimate?.optimisticUsd || 0);
+      totals.midpointUsd += Number(month.paygEstimate?.midpointUsd || 0);
+      totals.conservativeUsd += Number(month.paygEstimate?.conservativeUsd || 0);
+      return totals;
+    },
+    { optimisticUsd: 0, midpointUsd: 0, conservativeUsd: 0 }
+  );
+
+  machines.push(...unavailable);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    source: "snapshot-aggregate",
+    machine: os.hostname(),
+    period: {
+      monthsBack,
+      start: fromMonthsBack(monthsBack).toISOString(),
+      end: new Date().toISOString()
+    },
+    plans: PLAN_PROFILES,
+    months,
+    recommendation,
+    paygEstimate: {
+      optimisticUsd: Number(paygEstimate.optimisticUsd.toFixed(4)),
+      midpointUsd: Number(paygEstimate.midpointUsd.toFixed(4)),
+      conservativeUsd: Number(paygEstimate.conservativeUsd.toFixed(4))
+    },
+    totals: {
+      distinctProjects: Array.from(distinctProjects).sort(),
+      providers: Array.from(providers).sort(),
+      sessionCount,
+      activeDays: globalActiveDays.size
+    },
+    machines,
+    notes: [
+      `This report consolidates ${reports.length} Codex snapshot(s) from ${SNAPSHOTS_DIR}.`,
+      unavailable.length
+        ? `The following sources did not contain Codex local data: ${unavailable.map((item) => item.machine).join(", ")}.`
+        : "All detected snapshot sources contained Codex local data.",
+      "For ChatGPT subscription accounts, aggregating local snapshots per machine is the most faithful way to estimate total Codex CLI usage.",
+      "As far as current public documentation shows, there is no official API to automatically fetch total Codex usage for a ChatGPT subscription across all machines and accounts."
+    ]
+  };
+}
+
+async function buildCombinedSnapshotReport(monthsBack) {
+  const snapshotSources = listSnapshotSources();
+  const availableSources = snapshotSources.filter((source) => source.available);
+  const unavailableSources = snapshotSources.filter((source) => !source.available);
+
+  if (!availableSources.length) {
+    return buildLocalReport(monthsBack);
+  }
+
+  const reports = [];
+
+  for (const source of availableSources) {
+    reports.push(await buildSnapshotReportFromSource(source, monthsBack));
+  }
+
+  return mergeLocalReports(reports, monthsBack, unavailableSources);
 }
 
 async function buildUsageReport(monthsBack) {
@@ -780,9 +919,11 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "GET" && requestUrl.pathname === "/api/local-report") {
     const monthsBack = Math.max(1, Math.min(24, Number(requestUrl.searchParams.get("months") || 6)));
+    const scope = String(requestUrl.searchParams.get("scope") || "all").toLowerCase();
 
     try {
-      const report = await buildLocalReport(monthsBack);
+      const report =
+        scope === "local" ? await buildLocalReport(monthsBack) : await buildCombinedSnapshotReport(monthsBack);
       sendJson(res, 200, report);
     } catch (error) {
       sendJson(res, 500, {

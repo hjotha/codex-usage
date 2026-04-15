@@ -7,8 +7,6 @@ const notesListEl = document.getElementById("notes-list");
 const monthsSectionEl = document.getElementById("months-section");
 const plansSectionEl = document.getElementById("plans-section");
 const notesSectionEl = document.getElementById("notes-section");
-const machineNameEl = document.getElementById("machine-name");
-const machineListEl = document.getElementById("machine-list");
 
 function formatInteger(value) {
   return new Intl.NumberFormat("en-US").format(value || 0);
@@ -35,8 +33,6 @@ function average(values) {
 }
 
 function renderSummary(report) {
-  machineNameEl.textContent = report.machine || "Unknown";
-  machineListEl.textContent = (report.machines || []).map((item) => item.machine).join(", ") || "Unknown";
   const activeMonths = report.months.filter(
     (month) => month.requests > 0 || month.sessions > 0 || month.outputTokens > 0
   );
@@ -45,13 +41,14 @@ function renderSummary(report) {
   const totalTokens = report.months.reduce((sum, month) => sum + (month.outputTokens || 0), 0);
   const avgMonthlyRequests = average(activeMonths.map((month) => month.requests));
   const activeDays = report.months.reduce((sum, month) => sum + (month.activeDays || 0), 0);
+  const machineCount = (report.machines || []).filter((machine) => machine.status === "ok").length;
 
   summaryEl.innerHTML = [
+    machineCount ? metricCard("Machines", formatInteger(machineCount)) : "",
     metricCard("Sessions", formatInteger(totalSessions)),
     metricCard("Prompts", formatInteger(totalRequests)),
     metricCard("Tokens used", formatInteger(totalTokens)),
     metricCard("Estimated PAYG", formatUsd(report.paygEstimate?.midpointUsd || 0)),
-    metricCard("Machines", formatInteger(report.totals?.machineCount || (report.machines || []).length || 0)),
     metricCard("Active days", formatInteger(activeDays)),
     metricCard("Avg monthly prompts", formatInteger(Math.round(avgMonthlyRequests)))
   ].join("");
@@ -70,15 +67,16 @@ function renderRecommendation(report) {
   const selected = report.recommendation.comparedPlans.find(
     (plan) => plan.id === report.recommendation.recommendedPlanId
   );
+  const scopeLabel =
+    report.source === "snapshot-aggregate" ? "imported snapshots across machines" : "local history from this machine";
 
   recommendationEl.classList.remove("hidden");
   recommendationEl.innerHTML = `
     <p class="eyebrow">Recommendation</p>
     <h2>${selected ? selected.name : report.recommendation.recommendedPlanId}</h2>
     <p class="lede small">
-      Confidence: ${report.recommendation.confidence}. This recommendation is based on local Codex
-      history from ${report.machine || "the current machine"}, not on any official published
-      app-message limit.
+      Confidence: ${report.recommendation.confidence}. This recommendation is based on
+      ${scopeLabel}, not on any official published app-message limit.
     </p>
     <p class="lede small">
       If this same volume had been billed as pay-as-you-go, the midpoint estimate for the period
@@ -142,10 +140,17 @@ function renderNotes(report) {
 
 async function loadReport() {
   const months = document.getElementById("months").value || "6";
-  setStatus("Reading local Codex history from the current machine...", "loading");
+  const scope = document.getElementById("scope").value || "all";
+  const loadingLabel =
+    scope === "local"
+      ? "Reading local Codex history from this machine..."
+      : "Reading imported Codex snapshots across machines...";
+  setStatus(loadingLabel, "loading");
 
   try {
-    const response = await fetch(`/api/local-report?months=${encodeURIComponent(months)}`);
+    const response = await fetch(
+      `/api/local-report?months=${encodeURIComponent(months)}&scope=${encodeURIComponent(scope)}`
+    );
     const payload = await response.json();
 
     if (!response.ok) {
@@ -162,8 +167,6 @@ async function loadReport() {
       "success"
     );
   } catch (error) {
-    machineNameEl.textContent = "Unavailable";
-    machineListEl.textContent = "Unavailable";
     recommendationEl.classList.add("hidden");
     monthsSectionEl.classList.add("hidden");
     plansSectionEl.classList.add("hidden");

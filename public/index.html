@@ -10,24 +10,27 @@
     <main class="page">
       <section class="hero">
         <p class="eyebrow">Codex Local Usage</p>
-        <h1>Analyze Codex usage across your machines and estimate the right plan.</h1>
+        <h1>Analyze Codex usage and estimate the right plan.</h1>
         <p class="lede">
-          This dashboard currently reads local Codex CLI history from one machine, aggregates
-          sessions, prompts, tokens, and active days over recent months, and suggests the most
-          sensible plan based on your actual usage pattern.
+          This dashboard reads local Codex CLI history from this machine or imported snapshots,
+          aggregates sessions, prompts, tokens, and active days over recent months, and suggests
+          the most sensible plan based on your actual usage pattern.
         </p>
-        <p class="hint hero-machine">Current machine: <strong id="machine-name">Loading...</strong></p>
-        <p class="hint hero-machine">Included machines: <strong id="machine-list">Loading...</strong></p>
       </section>
 
       <section class="controls card">
         <label for="months">Months analyzed</label>
         <div class="controls-row">
           <input id="months" type="number" min="1" max="24" value="6" />
+          <select id="scope">
+            <option value="all">Imported snapshots</option>
+            <option value="local">This machine only</option>
+          </select>
           <button id="load-report">Refresh analysis</button>
         </div>
         <p class="hint">
-          This mode does not depend on the OpenAI API. It uses local files in `~/.codex`.
+          This mode does not depend on the OpenAI API. It uses local files in `~/.codex` or
+          imported snapshots in `/home/hjotha/codex-usage/data-snapshots`.
         </p>
       </section>
 

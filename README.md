@@ -1,6 +1,6 @@
 # Codex Usage Analyzer
 
-Aplicacao local para analisar o uso do Codex nesta maquina e estimar qual plano faz mais sentido com base no historico real do CLI.
+Aplicacao local para analisar o uso do Codex nesta maquina ou em snapshots importados de varias maquinas e estimar qual plano faz mais sentido com base no historico real do CLI.
 
 ## Modo principal
 
@@ -11,6 +11,13 @@ O modo principal agora e o modo local:
 - agrupa o uso por mes
 - mostra sessoes, prompts, tokens e dias ativos
 - sugere um plano com base em uma heuristica editavel
+
+Tambem existe o modo consolidado por snapshots:
+
+- le subpastas em `/home/hjotha/codex-usage/data-snapshots`
+- espera `state_5.sqlite` e opcionalmente `history.jsonl` em cada origem
+- agrega o uso por mes entre varias maquinas
+- ignora snapshots sem base do Codex e lista essas origens nas notas
 
 ## Por que isso existe
 
@@ -37,6 +44,8 @@ Abra `http://localhost:3000`.
 ## Endpoints
 
 - `GET /api/local-report?months=6`
+- `GET /api/local-report?months=6&scope=all`
+- `GET /api/local-report?months=6&scope=local`
 - `GET /api/health`
 
 ## Estrutura
