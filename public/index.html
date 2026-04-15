@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="pt-BR">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -10,22 +10,22 @@
     <main class="page">
       <section class="hero">
         <p class="eyebrow">Codex Local Usage</p>
-        <h1>Analise o uso do Codex nesta maquina e estime seu plano ideal.</h1>
+        <h1>Analyze Codex usage on this machine and estimate the right plan.</h1>
         <p class="lede">
-          Este dashboard le o historico local do Codex CLI nesta maquina, soma sessoes, prompts,
-          tokens e dias ativos nos ultimos meses e sugere o plano mais adequado com base no seu
-          padrao real.
+          This dashboard reads the local Codex CLI history on this machine, aggregates sessions,
+          prompts, tokens, and active days over recent months, and suggests the most sensible plan
+          based on your actual usage pattern.
         </p>
       </section>
 
       <section class="controls card">
-        <label for="months">Meses analisados</label>
+        <label for="months">Months analyzed</label>
         <div class="controls-row">
           <input id="months" type="number" min="1" max="24" value="6" />
-          <button id="load-report">Atualizar analise</button>
+          <button id="load-report">Refresh analysis</button>
         </div>
         <p class="hint">
-          Este modo nao depende da API da OpenAI. Ele usa os arquivos locais em `~/.codex`.
+          This mode does not depend on the OpenAI API. It uses local files in `~/.codex`.
         </p>
       </section>
 
@@ -37,17 +37,18 @@
 
       <section class="card hidden" id="months-section">
         <div class="section-heading">
-          <h2>Uso mensal</h2>
+          <h2>Monthly usage</h2>
         </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Mes</th>
-                <th>Sessoes</th>
+                <th>Month</th>
+                <th>Sessions</th>
                 <th>Requests</th>
                 <th>Tokens</th>
-                <th>Dias ativos</th>
+                <th>Estimated PAYG</th>
+                <th>Active days</th>
                 <th>Providers</th>
               </tr>
             </thead>
@@ -58,14 +59,14 @@
 
       <section class="card hidden" id="plans-section">
         <div class="section-heading">
-          <h2>Comparacao de planos</h2>
+          <h2>Plan comparison</h2>
         </div>
         <div id="plans-grid" class="plans-grid"></div>
       </section>
 
       <section class="card hidden" id="notes-section">
         <div class="section-heading">
-          <h2>Notas</h2>
+          <h2>Notes</h2>
         </div>
         <ul id="notes-list" class="notes-list"></ul>
       </section>

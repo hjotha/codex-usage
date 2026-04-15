@@ -9,7 +9,7 @@ const plansSectionEl = document.getElementById("plans-section");
 const notesSectionEl = document.getElementById("notes-section");
 
 function formatInteger(value) {
-  return new Intl.NumberFormat("pt-BR").format(value || 0);
+  return new Intl.NumberFormat("en-US").format(value || 0);
 }
 
 function formatUsd(value) {
@@ -43,11 +43,12 @@ function renderSummary(report) {
   const activeDays = report.months.reduce((sum, month) => sum + (month.activeDays || 0), 0);
 
   summaryEl.innerHTML = [
-    metricCard("Sessoes", formatInteger(totalSessions)),
+    metricCard("Sessions", formatInteger(totalSessions)),
     metricCard("Prompts", formatInteger(totalRequests)),
-    metricCard("Tokens usados", formatInteger(totalTokens)),
-    metricCard("Dias ativos", formatInteger(activeDays)),
-    metricCard("Media mensal de prompts", formatInteger(Math.round(avgMonthlyRequests)))
+    metricCard("Tokens used", formatInteger(totalTokens)),
+    metricCard("Estimated PAYG", formatUsd(report.paygEstimate?.midpointUsd || 0)),
+    metricCard("Active days", formatInteger(activeDays)),
+    metricCard("Avg monthly prompts", formatInteger(Math.round(avgMonthlyRequests)))
   ].join("");
 }
 
@@ -67,11 +68,15 @@ function renderRecommendation(report) {
 
   recommendationEl.classList.remove("hidden");
   recommendationEl.innerHTML = `
-    <p class="eyebrow">Recomendacao</p>
+    <p class="eyebrow">Recommendation</p>
     <h2>${selected ? selected.name : report.recommendation.recommendedPlanId}</h2>
     <p class="lede small">
-      Confianca: ${report.recommendation.confidence}. Esta recomendacao e baseada no historico
-      local do Codex nesta maquina, nao em um limite oficial publicado de mensagens do app.
+      Confidence: ${report.recommendation.confidence}. This recommendation is based on local Codex
+      history from this machine, not on any official published app-message limit.
+    </p>
+    <p class="lede small">
+      If this same volume had been billed as pay-as-you-go, the midpoint estimate for the period
+      would be ${formatUsd(report.paygEstimate?.midpointUsd || 0)}.
     </p>
     <ul class="notes-list">
       ${report.recommendation.rationale.map((item) => `<li>${item}</li>`).join("")}
@@ -89,6 +94,7 @@ function renderMonths(report) {
           <td>${formatInteger(month.sessions || 0)}</td>
           <td>${formatInteger(month.requests)}</td>
           <td>${formatInteger(month.outputTokens)}</td>
+          <td>${formatUsd(month.paygEstimate?.midpointUsd || 0)}</td>
           <td>${formatInteger(month.activeDays || 0)}</td>
           <td>${month.models.length ? month.models.join(", ") : "-"}</td>
         </tr>
@@ -104,13 +110,13 @@ function renderPlans(report) {
       const active = plan.id === report.recommendation.recommendedPlanId;
       return `
         <article class="plan card ${active ? "plan-active" : ""}">
-          <p class="eyebrow">${active ? "Escolhido" : "Alternativa"}</p>
+          <p class="eyebrow">${active ? "Selected" : "Alternative"}</p>
           <h3>${plan.name}</h3>
-          <p class="plan-price">${formatUsd(plan.monthlyPriceUsd)}/mes</p>
+          <p class="plan-price">${formatUsd(plan.monthlyPriceUsd)}/month</p>
           <p class="plan-copy">${plan.description}</p>
           <dl class="plan-stats">
-            <div><dt>Teto de custo heuristico</dt><dd>${formatUsd(plan.monthlyCostCeilingUsd)}</dd></div>
-            <div><dt>Teto de requests heuristico</dt><dd>${formatInteger(plan.monthlyRequestsCeiling)}</dd></div>
+            <div><dt>Heuristic cost ceiling</dt><dd>${formatUsd(plan.monthlyCostCeilingUsd)}</dd></div>
+            <div><dt>Heuristic request ceiling</dt><dd>${formatInteger(plan.monthlyRequestsCeiling)}</dd></div>
             <div><dt>Score</dt><dd>${plan.score?.toFixed ? plan.score.toFixed(2) : "n/a"}</dd></div>
           </dl>
         </article>
@@ -121,19 +127,23 @@ function renderPlans(report) {
 
 function renderNotes(report) {
   notesSectionEl.classList.remove("hidden");
-  notesListEl.innerHTML = report.notes.map((note) => `<li>${note}</li>`).join("");
+  const estimate = report.paygEstimate || {};
+  notesListEl.innerHTML = [
+    `<li>Estimated pay-as-you-go for the period: optimistic ${formatUsd(estimate.optimisticUsd || 0)}, midpoint ${formatUsd(estimate.midpointUsd || 0)}, and conservative ${formatUsd(estimate.conservativeUsd || 0)}.</li>`,
+    ...report.notes.map((note) => `<li>${note}</li>`)
+  ].join("");
 }
 
 async function loadReport() {
   const months = document.getElementById("months").value || "6";
-  setStatus("Lendo o historico local do Codex nesta maquina...", "loading");
+  setStatus("Reading local Codex history from this machine...", "loading");
 
   try {
     const response = await fetch(`/api/local-report?months=${encodeURIComponent(months)}`);
     const payload = await response.json();
 
     if (!response.ok) {
-      throw new Error(payload.error || "Falha ao carregar relatorio.");
+      throw new Error(payload.error || "Failed to load report.");
     }
 
     renderSummary(payload);
@@ -142,7 +152,7 @@ async function loadReport() {
     renderPlans(payload);
     renderNotes(payload);
     setStatus(
-      `Relatorio atualizado em ${new Date(payload.generatedAt).toLocaleString("pt-BR")}.`,
+      `Report updated at ${new Date(payload.generatedAt).toLocaleString("en-US")}.`,
       "success"
     );
   } catch (error) {

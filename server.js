@@ -11,43 +11,51 @@ const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const LOCAL_STATE_DB = path.join(CODEX_HOME, "state_5.sqlite");
 const LOCAL_HISTORY_JSONL = path.join(CODEX_HOME, "history.jsonl");
+const LOCAL_CONFIG_TOML = path.join(CODEX_HOME, "config.toml");
+const MODEL_PRICING = {
+  "gpt-5.4": {
+    inputPerMillionUsd: 2.5,
+    cachedInputPerMillionUsd: 0.25,
+    outputPerMillionUsd: 15
+  }
+};
 
 const PLAN_PROFILES = [
   {
     id: "api-only",
-    name: "Seguir no pay-as-you-go",
+    name: "Stay on pay-as-you-go",
     monthlyPriceUsd: 0,
     monthlyCostCeilingUsd: 15,
     monthlyRequestsCeiling: 150,
     description:
-      "Uso baixo ou esporadico. Mantem flexibilidade e evita pagar assinatura fixa desnecessaria."
+      "Low or sporadic usage. Keeps flexibility and avoids paying for a fixed plan too early."
   },
   {
     id: "plus",
-    name: "Plus / equivalente",
+    name: "Plus / equivalent",
     monthlyPriceUsd: 20,
     monthlyCostCeilingUsd: 60,
     monthlyRequestsCeiling: 800,
     description:
-      "Faz sentido quando seu custo recorrente ja supera uma faixa baixa e o uso do Codex e consistente."
+      "Makes sense when recurring usage is already consistent and above a light-use profile."
   },
   {
     id: "pro",
-    name: "Pro / equivalente",
+    name: "Pro / equivalent",
     monthlyPriceUsd: 200,
     monthlyCostCeilingUsd: 300,
     monthlyRequestsCeiling: 4000,
     description:
-      "Indicado quando o uso e muito frequente e um plano mais alto tende a reduzir atrito operacional."
+      "Best fit when usage is very frequent and a higher-tier plan is likely to reduce operational friction."
   },
   {
     id: "business",
-    name: "Business / equipe",
+    name: "Business / team",
     monthlyPriceUsd: 25,
     monthlyCostCeilingUsd: 1000,
     monthlyRequestsCeiling: 10000,
     description:
-      "Perfil para uso organizacional consolidado, varias chaves/projetos e necessidade de governanca."
+      "Intended for team or organization-level usage with multiple projects and governance needs."
   }
 ];
 
@@ -106,7 +114,7 @@ function isCodexModel(modelName) {
 
 async function fetchOpenAI(pathname, query) {
   if (!OPENAI_ADMIN_KEY) {
-    throw new Error("Defina OPENAI_ADMIN_KEY para consultar os endpoints da organizacao.");
+    throw new Error("Set OPENAI_ADMIN_KEY to query organization usage endpoints.");
   }
 
   const url = new URL(`${OPENAI_BASE_URL}${pathname}`);
@@ -132,7 +140,7 @@ async function fetchOpenAI(pathname, query) {
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Erro OpenAI ${response.status}: ${text}`);
+    throw new Error(`OpenAI error ${response.status}: ${text}`);
   }
 
   return response.json();
@@ -263,6 +271,31 @@ function average(numbers) {
   return numbers.reduce((sum, value) => sum + value, 0) / numbers.length;
 }
 
+function getConfiguredModel() {
+  try {
+    const config = fs.readFileSync(LOCAL_CONFIG_TOML, "utf8");
+    const match = config.match(/^model\s*=\s*"([^"]+)"/m);
+    return match ? match[1] : "gpt-5.4";
+  } catch {
+    return "gpt-5.4";
+  }
+}
+
+function estimatePaygCost(tokensUsed, modelName) {
+  const pricing = MODEL_PRICING[modelName] || MODEL_PRICING["gpt-5.4"];
+  const conservativeUsd = (tokensUsed / 1_000_000) * pricing.outputPerMillionUsd;
+  const optimisticUsd = (tokensUsed / 1_000_000) * pricing.inputPerMillionUsd;
+  const midpointUsd = (conservativeUsd + optimisticUsd) / 2;
+
+  return {
+    model: modelName,
+    pricing,
+    optimisticUsd: Number(optimisticUsd.toFixed(4)),
+    midpointUsd: Number(midpointUsd.toFixed(4)),
+    conservativeUsd: Number(conservativeUsd.toFixed(4))
+  };
+}
+
 function buildMonthRange(monthsBack) {
   const months = [];
   const cursor = fromMonthsBack(monthsBack);
@@ -287,7 +320,7 @@ function runPythonJson(script, args = []) {
       try {
         resolve(JSON.parse(stdout));
       } catch (parseError) {
-        reject(new Error(`Falha ao interpretar saida Python: ${parseError.message}`));
+        reject(new Error(`Failed to parse Python output: ${parseError.message}`));
       }
     });
   });
@@ -304,10 +337,10 @@ function recommendPlan(months) {
   if (!activeMonths.length) {
     return {
       recommendedPlanId: "api-only",
-      confidence: "baixa",
+      confidence: "low",
       rationale: [
-        "Nao ha uso suficiente de Codex identificado nos meses consultados.",
-        "Sem um padrao recorrente, pagar uma assinatura fixa tende a ser desperdicio."
+        "There is not enough Codex usage in the selected period to justify a fixed plan.",
+        "Without a recurring pattern, paying for a subscription is likely wasteful."
       ],
       comparedPlans: PLAN_PROFILES
     };
@@ -342,34 +375,35 @@ function recommendPlan(months) {
 
   const best = scored[0];
   const rationale = [
-    `Media mensal de requisicoes: ${Math.round(avgMonthlyRequests)}; pico mensal: ${peakMonthlyRequests}.`,
-    `Media mensal de tokens observados: ${Math.round(avgMonthlyTokens).toLocaleString("pt-BR")}; pico mensal: ${Math.round(peakMonthlyTokens).toLocaleString("pt-BR")}.`
+    `Average monthly requests: ${Math.round(avgMonthlyRequests)}; monthly peak: ${peakMonthlyRequests}.`,
+    `Average observed monthly tokens: ${Math.round(avgMonthlyTokens).toLocaleString("en-US")}; monthly peak: ${Math.round(peakMonthlyTokens).toLocaleString("en-US")}.`
   ];
 
   if (peakMonthlyCost > 0 || avgMonthlyCost > 0) {
-    rationale.unshift(`Custo medio mensal estimado de Codex: US$ ${avgMonthlyCost.toFixed(2)}.`);
-    rationale.push(`Maior gasto mensal observado: US$ ${peakMonthlyCost.toFixed(2)}.`);
+    rationale.unshift(`Estimated average monthly Codex cost: US$ ${avgMonthlyCost.toFixed(2)}.`);
+    rationale.push(`Highest observed monthly cost: US$ ${peakMonthlyCost.toFixed(2)}.`);
   } else {
-    rationale.push("Como este modo usa apenas dados locais do Codex, nao existe custo oficial associado por mes neste relatorio.");
+    rationale.push("This local mode does not include official monthly billing data, so cost here is only estimated.");
   }
 
   if (best.id === "api-only") {
-    rationale.push("Seu padrao atual parece baixo o bastante para manter cobranca por uso.");
+    rationale.push("Your current pattern looks light enough to stay on pay-as-you-go.");
   } else {
     rationale.push(
-      "Seu uso recorrente sugere que um plano fixo pode reduzir custo previsivel ou atrito de limite."
+      "Your recurring usage suggests that a fixed plan could reduce pricing uncertainty and limit friction."
     );
   }
 
   return {
     recommendedPlanId: best.id,
-    confidence: activeMonths.length >= 3 ? "media" : "baixa",
+    confidence: activeMonths.length >= 3 ? "medium" : "low",
     rationale,
     comparedPlans: scored
   };
 }
 
 async function buildLocalReport(monthsBack) {
+  const configuredModel = getConfiguredModel();
   const pythonScript = `
 import json, sqlite3, sys
 from collections import defaultdict
@@ -489,23 +523,29 @@ print(json.dumps({
   const monthRange = buildMonthRange(monthsBack);
   const monthMap = new Map(localData.months.map((month) => [month.month, month]));
   const months = monthRange.map(
-    (monthKey) =>
-      monthMap.get(monthKey) || {
-        month: monthKey,
-        sessions: 0,
-        requests: 0,
-        inputTokens: 0,
-        outputTokens: 0,
-        cachedTokens: 0,
-        totalCostUsd: 0,
-        models: [],
-        projects: [],
-        activeDays: 0,
-        sampleTitles: []
-      }
+    (monthKey) => {
+      const month =
+        monthMap.get(monthKey) || {
+          month: monthKey,
+          sessions: 0,
+          requests: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          cachedTokens: 0,
+          totalCostUsd: 0,
+          models: [],
+          projects: [],
+          activeDays: 0,
+          sampleTitles: []
+        };
+      month.paygEstimate = estimatePaygCost(month.outputTokens || 0, configuredModel);
+      return month;
+    }
   );
 
   const recommendation = recommendPlan(months);
+  const totalObservedTokens = months.reduce((sum, month) => sum + (month.outputTokens || 0), 0);
+  const paygEstimate = estimatePaygCost(totalObservedTokens, configuredModel);
 
   return {
     generatedAt: new Date().toISOString(),
@@ -520,10 +560,13 @@ print(json.dumps({
     months,
     recommendation,
     totals: localData.totals,
+    paygEstimate,
     notes: [
-      "Este relatorio usa os arquivos locais do Codex nesta maquina, principalmente ~/.codex/state_5.sqlite e ~/.codex/history.jsonl.",
-      "Para contas com assinatura ChatGPT, esse caminho local e a forma mais confiavel de medir seu uso real do Codex CLI sem depender de endpoints de organizacao da API.",
-      "Nao existe, ate onde a documentacao publica mostra, uma API oficial para pegar o uso total do Codex da sua assinatura ChatGPT entre todas as maquinas e contas automaticamente."
+      "This report uses local Codex files from this machine, mainly ~/.codex/state_5.sqlite and ~/.codex/history.jsonl.",
+      "For ChatGPT subscription accounts, this local approach is the most reliable way to measure real Codex CLI usage without depending on organization-level API endpoints.",
+      `The pay-as-you-go estimate is based on the current official ${configuredModel} pricing: US$ ${paygEstimate.pricing.inputPerMillionUsd.toFixed(2)}/1M input tokens, US$ ${paygEstimate.pricing.cachedInputPerMillionUsd.toFixed(2)}/1M cached input tokens, and US$ ${paygEstimate.pricing.outputPerMillionUsd.toFixed(2)}/1M output tokens.`,
+      "Because this machine's local data does not safely separate input and output tokens, the dashboard shows three estimates: optimistic, midpoint, and conservative.",
+      "As far as current public documentation shows, there is no official API to automatically fetch total Codex usage for a ChatGPT subscription across all machines and accounts."
     ]
   };
 }
@@ -562,9 +605,9 @@ async function buildUsageReport(monthsBack) {
     months,
     recommendation,
     notes: [
-      "A OpenAI expoe endpoints oficiais de usage e costs da organizacao, que permitem consolidar uso entre maquinas quando todas usam a mesma organizacao/projeto.",
-      "A recomendacao de assinatura e heuristica. Os limites reais de planos ChatGPT/Codex nao sao expostos por esta API.",
-      "Se voce usa maquinas com organizacoes ou contas diferentes, este dashboard so enxerga o escopo da chave administrativa informada."
+      "OpenAI exposes official organization usage and cost endpoints, which can consolidate usage across machines when they all belong to the same organization or project.",
+      "The plan recommendation is heuristic. Real ChatGPT or Codex plan limits are not exposed by this API.",
+      "If you use machines tied to different organizations or accounts, this dashboard only sees the scope available to the configured admin key."
     ]
   };
 }
@@ -592,7 +635,7 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 500, {
         error: error.message,
         hint:
-          "Verifique OPENAI_ADMIN_KEY e confirme que a chave possui acesso aos endpoints de uso/custo da organizacao."
+          "Check OPENAI_ADMIN_KEY and confirm the key has access to the organization's usage and cost endpoints."
       });
     }
     return;
@@ -607,7 +650,7 @@ const server = http.createServer(async (req, res) => {
     } catch (error) {
       sendJson(res, 500, {
         error: error.message,
-        hint: "Verifique se os arquivos locais do Codex existem em ~/.codex e se podem ser lidos."
+        hint: "Check that local Codex files exist under ~/.codex and can be read."
       });
     }
     return;
@@ -625,5 +668,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Codex Usage app em http://localhost:${PORT}`);
+  console.log(`Codex Usage app at http://localhost:${PORT}`);
 });
