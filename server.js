@@ -643,16 +643,43 @@ function listSnapshotSources() {
     });
 }
 
+function buildMachineOptions(includeLocal = true) {
+  const options = [];
+  const seen = new Set();
+
+  if (includeLocal) {
+    const localMachine = os.hostname();
+    options.push({ machine: localMachine, source: "local", available: true });
+    seen.add(localMachine);
+  }
+
+  for (const source of listSnapshotSources()) {
+    if (seen.has(source.machine)) {
+      continue;
+    }
+
+    options.push({
+      machine: source.machine,
+      source: "snapshot",
+      available: source.available,
+      status: source.status
+    });
+    seen.add(source.machine);
+  }
+
+  return options;
+}
+
 function mergeLocalReports(reports, monthsBack, unavailableSources = []) {
   const monthMap = new Map();
   const providers = new Set();
   const distinctProjects = new Set();
   const globalActiveDays = new Set();
-  const machines = [];
+  const machineMap = new Map();
   let sessionCount = 0;
 
   for (const report of reports) {
-    machines.push({
+    machineMap.set(report.machine, {
       machine: report.machine,
       status: "ok",
       sessions: report.months.reduce((sum, month) => sum + (month.sessions || 0), 0),
@@ -778,10 +805,12 @@ function mergeLocalReports(reports, monthsBack, unavailableSources = []) {
   });
 
   const recommendation = recommendPlan(months);
-  const unavailable = unavailableSources.map((source) => ({
-    machine: source.machine,
-    status: source.status
-  }));
+  const unavailable = unavailableSources
+    .filter((source) => !machineMap.has(source.machine))
+    .map((source) => ({
+      machine: source.machine,
+      status: source.status
+    }));
   const paygEstimate = months.reduce(
     (totals, month) => {
       totals.optimisticUsd += Number(month.paygEstimate?.optimisticUsd || 0);
@@ -792,6 +821,7 @@ function mergeLocalReports(reports, monthsBack, unavailableSources = []) {
     { optimisticUsd: 0, midpointUsd: 0, conservativeUsd: 0 }
   );
 
+  const machines = Array.from(machineMap.values()).sort((a, b) => a.machine.localeCompare(b.machine));
   machines.push(...unavailable);
 
   return {
@@ -818,6 +848,7 @@ function mergeLocalReports(reports, monthsBack, unavailableSources = []) {
       activeDays: globalActiveDays.size
     },
     machines,
+    machineOptions: buildMachineOptions(true),
     notes: [
       `This report consolidates ${reports.length} Codex snapshot(s) from ${SNAPSHOTS_DIR}.`,
       unavailable.length
@@ -833,18 +864,43 @@ async function buildCombinedSnapshotReport(monthsBack) {
   const snapshotSources = listSnapshotSources();
   const availableSources = snapshotSources.filter((source) => source.available);
   const unavailableSources = snapshotSources.filter((source) => !source.available);
-
-  if (!availableSources.length) {
-    return buildLocalReport(monthsBack);
-  }
-
-  const reports = [];
+  const reports = [await buildLocalReport(monthsBack)];
 
   for (const source of availableSources) {
+    if (source.machine === os.hostname()) {
+      continue;
+    }
     reports.push(await buildSnapshotReportFromSource(source, monthsBack));
   }
 
   return mergeLocalReports(reports, monthsBack, unavailableSources);
+}
+
+async function buildImportedSnapshotSelectionReport(monthsBack, machineName) {
+  if (machineName === os.hostname()) {
+    const report = await buildLocalReport(monthsBack);
+    return {
+      ...report,
+      machineOptions: buildMachineOptions(true)
+    };
+  }
+
+  const snapshotSources = listSnapshotSources();
+  const selected = snapshotSources.find((source) => source.machine === machineName);
+
+  if (!selected) {
+    throw new Error(`Snapshot source not found: ${machineName}`);
+  }
+
+  if (!selected.available) {
+    throw new Error(`Snapshot source does not contain Codex local data: ${machineName}`);
+  }
+
+  const report = await buildSnapshotReportFromSource(selected, monthsBack);
+  return {
+    ...report,
+    machineOptions: buildMachineOptions(true)
+  };
 }
 
 async function buildUsageReport(monthsBack) {
@@ -920,10 +976,19 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && requestUrl.pathname === "/api/local-report") {
     const monthsBack = Math.max(1, Math.min(24, Number(requestUrl.searchParams.get("months") || 6)));
     const scope = String(requestUrl.searchParams.get("scope") || "all").toLowerCase();
+    const machine = String(requestUrl.searchParams.get("machine") || "").trim();
 
     try {
-      const report =
-        scope === "local" ? await buildLocalReport(monthsBack) : await buildCombinedSnapshotReport(monthsBack);
+      let report;
+
+      if (scope === "local") {
+        report = await buildLocalReport(monthsBack);
+      } else if (machine && machine !== "all") {
+        report = await buildImportedSnapshotSelectionReport(monthsBack, machine);
+      } else {
+        report = await buildCombinedSnapshotReport(monthsBack);
+      }
+
       sendJson(res, 200, report);
     } catch (error) {
       sendJson(res, 500, {

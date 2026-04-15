@@ -19,13 +19,18 @@
       </section>
 
       <section class="controls card">
-        <label for="months">Months analyzed</label>
+        <label for="months">Analysis controls</label>
         <div class="controls-row">
-          <input id="months" type="number" min="1" max="24" value="6" />
-          <select id="scope">
-            <option value="all">Imported snapshots</option>
-            <option value="local">This machine only</option>
-          </select>
+          <div class="control-group">
+            <span class="control-label">Months</span>
+            <input id="months" type="number" min="1" max="24" value="6" />
+          </div>
+          <div class="control-group control-group-wide">
+            <span class="control-label">Machine selection</span>
+            <select id="machine-filter">
+              <option value="all">All imported snapshots</option>
+            </select>
+          </div>
           <button id="load-report">Refresh analysis</button>
         </div>
         <p class="hint">
@@ -39,6 +44,37 @@
       <section id="summary" class="summary-grid"></section>
 
       <section id="recommendation" class="card hidden"></section>
+
+      <section class="card hidden" id="trend-section">
+        <div class="section-heading">
+          <h2>Trend</h2>
+        </div>
+        <div id="trend-summary" class="trend-summary"></div>
+      </section>
+
+      <section class="card hidden" id="charts-section">
+        <div class="section-heading">
+          <h2>Usage charts</h2>
+        </div>
+        <div class="charts-grid">
+          <article class="chart-card">
+            <h3>Monthly tokens</h3>
+            <div id="tokens-chart"></div>
+          </article>
+          <article class="chart-card">
+            <h3>Monthly prompts</h3>
+            <div id="prompts-chart"></div>
+          </article>
+          <article class="chart-card">
+            <h3>Estimated PAYG</h3>
+            <div id="payg-chart"></div>
+          </article>
+          <article class="chart-card">
+            <h3>Machine share by tokens</h3>
+            <div id="machines-chart"></div>
+          </article>
+        </div>
+      </section>
 
       <section class="card hidden" id="months-section">
         <div class="section-heading">
