@@ -81,7 +81,9 @@ function renderSummary(report) {
   const totalRequests = report.months.reduce((sum, month) => sum + month.requests, 0);
   const totalSessions = report.months.reduce((sum, month) => sum + (month.sessions || 0), 0);
   const totalTokens = report.months.reduce((sum, month) => sum + (month.outputTokens || 0), 0);
-  const avgMonthlyRequests = average(activeMonths.map((month) => month.requests));
+  const avgMonthlyRequests = average(
+    activeMonths.filter((month) => month.requests > 0).map((month) => month.requests)
+  );
   const activeDays = report.months.reduce((sum, month) => sum + (month.activeDays || 0), 0);
   const machineCount = (report.machines || []).filter((machine) => machine.status === "ok").length;
 
@@ -499,11 +501,16 @@ function renderMonths(report) {
   const isClaude = report.product === "claude";
   monthsBodyEl.innerHTML = visibleMonths
     .map(
-      (month) => `
+      (month) => {
+        const promptsPerDay = (month.activeDays || 0) > 0
+          ? (month.requests / month.activeDays).toFixed(1)
+          : "0";
+        return `
         <tr>
           <td>${month.month}</td>
           <td>${formatInteger(month.sessions || 0)}</td>
           <td>${formatInteger(month.requests)}</td>
+          <td>${promptsPerDay}</td>
           <td>${formatInteger(month.inputTokens || 0)}</td>
           <td>${formatInteger(month.outputTokens || 0)}</td>
           <td title="Cache creation: ${formatInteger(month.cacheCreationTokens || 0)} / Cache read: ${formatInteger(month.cacheReadTokens || month.cachedTokens || 0)}">${formatInteger((month.cacheCreationTokens || 0) + (month.cacheReadTokens || month.cachedTokens || 0))}</td>
@@ -511,14 +518,15 @@ function renderMonths(report) {
           <td>${formatInteger(month.activeDays || 0)}</td>
           <td>${month.models.length ? month.models.join(", ") : "-"}</td>
         </tr>
-      `
+      `;
+      }
     )
     .join("");
 
   if (!visibleMonths.length) {
     monthsBodyEl.innerHTML = `
       <tr>
-        <td colspan="9">No monthly usage found in the selected period.</td>
+        <td colspan="10">No monthly usage found in the selected period.</td>
       </tr>
     `;
   }

@@ -1189,7 +1189,7 @@ try:
             month["requests"] += 1
             day = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
             month["activeDays"].add(day)
-            day_activity[day] += 0
+            day_activity[day] += 1
 except FileNotFoundError:
     pass
 
