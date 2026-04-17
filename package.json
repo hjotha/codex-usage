@@ -2,7 +2,7 @@
   "name": "codex-usage",
   "version": "0.1.0",
   "private": true,
-  "description": "Dashboard local para consolidar uso do Codex via OpenAI Usage API e sugerir a melhor assinatura.",
+  "description": "Dashboard local para consolidar uso do Codex e do Claude Code via historico local e snapshots.",
   "scripts": {
     "start": "node server.js"
   }

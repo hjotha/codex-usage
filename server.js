@@ -6,8 +6,6 @@ const { execFile } = require("child_process");
 const { URL } = require("url");
 
 const PORT = Number(process.env.PORT || 3000);
-const OPENAI_ADMIN_KEY = process.env.OPENAI_ADMIN_KEY || "";
-const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const LOCAL_STATE_DB = path.join(CODEX_HOME, "state_5.sqlite");
 const LOCAL_HISTORY_JSONL = path.join(CODEX_HOME, "history.jsonl");
@@ -171,175 +169,11 @@ function fileExists(filePath) {
   }
 }
 
-function toUnixSeconds(date) {
-  return Math.floor(date.getTime() / 1000);
-}
-
 function fromMonthsBack(months) {
   const now = new Date();
   const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
   date.setUTCMonth(date.getUTCMonth() - months + 1);
   return date;
-}
-
-function isCodexModel(modelName) {
-  if (!modelName) {
-    return false;
-  }
-
-  const normalized = String(modelName).toLowerCase();
-  return normalized.includes("codex");
-}
-
-async function fetchOpenAI(pathname, query) {
-  if (!OPENAI_ADMIN_KEY) {
-    throw new Error("Set OPENAI_ADMIN_KEY to query organization usage endpoints.");
-  }
-
-  const url = new URL(`${OPENAI_BASE_URL}${pathname}`);
-  Object.entries(query).forEach(([key, value]) => {
-    if (value === undefined || value === null || value === "") {
-      return;
-    }
-
-    if (Array.isArray(value)) {
-      value.forEach((item) => url.searchParams.append(key, item));
-      return;
-    }
-
-    url.searchParams.set(key, String(value));
-  });
-
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${OPENAI_ADMIN_KEY}`,
-      "Content-Type": "application/json"
-    }
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`OpenAI error ${response.status}: ${text}`);
-  }
-
-  return response.json();
-}
-
-async function fetchAllBuckets(pathname, baseQuery) {
-  const items = [];
-  let page;
-
-  do {
-    const payload = await fetchOpenAI(pathname, { ...baseQuery, page });
-    items.push(...(payload.data || []));
-    page = payload.has_more ? payload.next_page : undefined;
-  } while (page);
-
-  return items;
-}
-
-async function fetchBucketsInWindows(pathname, baseQuery, maxDaysPerWindow = 31) {
-  const windowSeconds = maxDaysPerWindow * 24 * 60 * 60;
-  const items = [];
-  let cursor = Number(baseQuery.start_time);
-  const finalEnd = Number(baseQuery.end_time);
-
-  while (cursor < finalEnd) {
-    const windowEnd = Math.min(finalEnd, cursor + windowSeconds);
-    const payload = await fetchOpenAI(pathname, {
-      ...baseQuery,
-      start_time: cursor,
-      end_time: windowEnd,
-      limit: maxDaysPerWindow
-    });
-
-    items.push(...(payload.data || []));
-    cursor = windowEnd;
-  }
-
-  return items;
-}
-
-function emptyMonthSummary(monthKey) {
-  return {
-    month: monthKey,
-    requests: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    cachedTokens: 0,
-    totalCostUsd: 0,
-    models: new Set(),
-    projects: new Set()
-  };
-}
-
-function monthKeyFromUnix(unixSeconds) {
-  return new Date(unixSeconds * 1000).toISOString().slice(0, 7);
-}
-
-function aggregateUsage(usageBuckets, costBuckets) {
-  const months = new Map();
-
-  for (const bucket of usageBuckets) {
-    const monthKey = monthKeyFromUnix(bucket.start_time);
-    const month = months.get(monthKey) || emptyMonthSummary(monthKey);
-
-    for (const result of bucket.results || bucket.result || []) {
-      if (!isCodexModel(result.model)) {
-        continue;
-      }
-
-      month.requests += result.num_model_requests || 0;
-      month.inputTokens += result.input_tokens || 0;
-      month.outputTokens += result.output_tokens || 0;
-      month.cachedTokens += result.input_cached_tokens || 0;
-
-      if (result.model) {
-        month.models.add(result.model);
-      }
-
-      if (result.project_id) {
-        month.projects.add(result.project_id);
-      }
-    }
-
-    months.set(monthKey, month);
-  }
-
-  for (const bucket of costBuckets) {
-    const monthKey = monthKeyFromUnix(bucket.start_time);
-    const month = months.get(monthKey) || emptyMonthSummary(monthKey);
-
-    for (const result of bucket.results || bucket.result || []) {
-      const lineItem = String(result.line_item || "").toLowerCase();
-      const projectId = result.project_id || "";
-      const projectMatches =
-        !projectId || month.projects.size === 0 || month.projects.has(projectId);
-
-      if (!projectMatches) {
-        continue;
-      }
-
-      if (lineItem.includes("codex") || lineItem.includes("gpt-5") || lineItem.includes("model")) {
-        month.totalCostUsd += Number(result.amount?.value || 0);
-      }
-    }
-
-    months.set(monthKey, month);
-  }
-
-  return Array.from(months.values())
-    .map((month) => ({
-      month: month.month,
-      requests: month.requests,
-      inputTokens: month.inputTokens,
-      outputTokens: month.outputTokens,
-      cachedTokens: month.cachedTokens,
-      totalCostUsd: Number(month.totalCostUsd.toFixed(4)),
-      models: Array.from(month.models).sort(),
-      projects: Array.from(month.projects).sort()
-    }))
-    .sort((a, b) => a.month.localeCompare(b.month));
 }
 
 function average(numbers) {
@@ -1576,47 +1410,6 @@ async function buildImportedSnapshotSelectionReport(monthsBack, machineName) {
   };
 }
 
-async function buildUsageReport(monthsBack) {
-  const startDate = fromMonthsBack(monthsBack);
-  const endDate = new Date();
-  const baseQuery = {
-    start_time: toUnixSeconds(startDate),
-    end_time: toUnixSeconds(endDate),
-    bucket_width: "1d",
-    group_by: ["model", "project_id"]
-  };
-
-  const [usageBuckets, costBuckets] = await Promise.all([
-    fetchBucketsInWindows("/organization/usage/completions", baseQuery),
-    fetchBucketsInWindows("/organization/costs", {
-      start_time: baseQuery.start_time,
-      end_time: baseQuery.end_time,
-      bucket_width: "1d",
-      group_by: ["project_id", "line_item"]
-    })
-  ]);
-
-  const months = aggregateUsage(usageBuckets, costBuckets);
-  const recommendation = recommendPlan(months);
-
-  return {
-    generatedAt: new Date().toISOString(),
-    period: {
-      monthsBack,
-      start: startDate.toISOString(),
-      end: endDate.toISOString()
-    },
-    plans: PLAN_PROFILES,
-    months,
-    recommendation,
-    notes: [
-      "OpenAI exposes official organization usage and cost endpoints, which can consolidate usage across machines when they all belong to the same organization or project.",
-      "The plan recommendation is heuristic. Real ChatGPT or Codex plan limits are not exposed by this API.",
-      "If you use machines tied to different organizations or accounts, this dashboard only sees the scope available to the configured admin key."
-    ]
-  };
-}
-
 const publicDir = path.join(__dirname, "public");
 
 const server = http.createServer(async (req, res) => {
@@ -1625,24 +1418,8 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && requestUrl.pathname === "/api/health") {
     sendJson(res, 200, {
       ok: true,
-      hasAdminKey: Boolean(OPENAI_ADMIN_KEY)
+      mode: "local"
     });
-    return;
-  }
-
-  if (req.method === "GET" && requestUrl.pathname === "/api/report") {
-    const monthsBack = Math.max(1, Math.min(24, Number(requestUrl.searchParams.get("months") || 6)));
-
-    try {
-      const report = await buildUsageReport(monthsBack);
-      sendJson(res, 200, report);
-    } catch (error) {
-      sendJson(res, 500, {
-        error: error.message,
-        hint:
-          "Check OPENAI_ADMIN_KEY and confirm the key has access to the organization's usage and cost endpoints."
-      });
-    }
     return;
   }
 
