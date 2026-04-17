@@ -609,6 +609,23 @@ async function loadReport() {
   }
 }
 
+async function initializeApp() {
+  try {
+    const response = await fetch("/api/health");
+    const payload = await response.json();
+    const anyCodex = Boolean(payload.availability?.anyCodex);
+
+    if (!anyCodex) {
+      productFilterEl.value = "claude";
+    }
+  } catch {
+    // Fall back to the default UI selection if health bootstrap is unavailable.
+  }
+
+  updateHint();
+  loadReport();
+}
+
 document.getElementById("load-report").addEventListener("click", loadReport);
 productFilterEl.addEventListener("change", () => {
   updateHint();
@@ -616,5 +633,4 @@ productFilterEl.addEventListener("change", () => {
 });
 machineFilterEl.addEventListener("change", loadReport);
 
-updateHint();
-loadReport();
+initializeApp();

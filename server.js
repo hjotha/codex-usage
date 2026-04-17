@@ -176,6 +176,22 @@ function fromMonthsBack(months) {
   return date;
 }
 
+function hasLocalCodexData() {
+  return fileExists(LOCAL_STATE_DB);
+}
+
+function hasLocalClaudeData() {
+  return fileExists(path.join(CLAUDE_HOME, "projects")) || fileExists(CLAUDE_HISTORY_JSONL);
+}
+
+function emptyPaygEstimate() {
+  return {
+    optimisticUsd: 0,
+    midpointUsd: 0,
+    conservativeUsd: 0
+  };
+}
+
 function average(numbers) {
   if (!numbers.length) {
     return 0;
@@ -335,7 +351,113 @@ function recommendPlan(months, planProfiles = CODEX_PLAN_PROFILES) {
   };
 }
 
+function buildEmptyCodexReport(monthsBack, machineName, notes = []) {
+  const configuredModel = getConfiguredModel();
+  const paygEstimate = estimatePaygCost(0, configuredModel);
+  const months = buildMonthRange(monthsBack).map((month) => ({
+    month,
+    sessions: 0,
+    requests: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedTokens: 0,
+    totalCostUsd: 0,
+    models: [],
+    projects: [],
+    activeDays: 0,
+    activeDayKeys: [],
+    sampleTitles: [],
+    paygEstimate: { ...paygEstimate }
+  }));
+
+  return {
+    generatedAt: new Date().toISOString(),
+    source: "local",
+    product: "codex",
+    machine: machineName,
+    period: {
+      monthsBack,
+      start: fromMonthsBack(monthsBack).toISOString(),
+      end: new Date().toISOString()
+    },
+    plans: PLAN_PROFILES,
+    months,
+    recommendation: recommendPlan(months),
+    totals: {
+      distinctProjects: [],
+      providers: [],
+      sessionCount: 0,
+      activeDays: 0,
+      activeDayKeys: []
+    },
+    paygEstimate,
+    notes
+  };
+}
+
+function buildEmptyClaudeReport(monthsBack, machineName, notes = []) {
+  const months = buildMonthRange(monthsBack).map((month) => ({
+    month,
+    sessions: 0,
+    requests: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationTokens: 0,
+    cacheReadTokens: 0,
+    cachedTokens: 0,
+    totalCostUsd: 0,
+    models: [],
+    projects: [],
+    activeDays: 0,
+    activeDayKeys: [],
+    sampleTitles: [],
+    tokensByModel: {},
+    paygEstimate: emptyPaygEstimate()
+  }));
+
+  return {
+    generatedAt: new Date().toISOString(),
+    source: "claude-local",
+    product: "claude",
+    machine: machineName,
+    period: {
+      monthsBack,
+      start: fromMonthsBack(monthsBack).toISOString(),
+      end: new Date().toISOString()
+    },
+    plans: CLAUDE_PLAN_PROFILES,
+    months,
+    recommendation: recommendPlan(months, CLAUDE_PLAN_PROFILES),
+    totals: {
+      distinctProjects: [],
+      providers: ["claude-code"],
+      sessionCount: 0,
+      activeDays: 0,
+      activeDayKeys: []
+    },
+    paygEstimate: emptyPaygEstimate(),
+    machines: [
+      {
+        machine: machineName,
+        status: "ok",
+        sessions: 0,
+        requests: 0,
+        tokens: 0
+      }
+    ],
+    machineOptions: [],
+    notes
+  };
+}
+
 async function buildLocalReport(monthsBack) {
+  if (!hasLocalCodexData()) {
+    return buildEmptyCodexReport(monthsBack, os.hostname(), [
+      `No local Codex database was found on ${os.hostname()}.`,
+      "This report is empty because ~/.codex/state_5.sqlite is missing or unavailable."
+    ]);
+  }
+
   return buildSnapshotReportFromSource({
     id: os.hostname(),
     machine: os.hostname(),
@@ -668,7 +790,13 @@ function buildClaudeMachineOptions(includeLocal = true) {
 
   if (includeLocal) {
     const localMachine = os.hostname();
-    options.push({ machine: localMachine, source: "local", available: true });
+    const available = hasLocalClaudeData();
+    options.push({
+      machine: localMachine,
+      source: "local",
+      available,
+      status: available ? "ok" : "missing-local-claude-data"
+    });
     seen.add(localMachine);
   }
 
@@ -690,7 +818,12 @@ function buildClaudeMachineOptions(includeLocal = true) {
 }
 
 async function buildClaudeLocalReport(monthsBack) {
-  const report = await buildClaudeReportFromSource(CLAUDE_HOME, os.hostname(), monthsBack);
+  const report = hasLocalClaudeData()
+    ? await buildClaudeReportFromSource(CLAUDE_HOME, os.hostname(), monthsBack)
+    : buildEmptyClaudeReport(monthsBack, os.hostname(), [
+        `No local Claude Code history was found on ${os.hostname()}.`,
+        "This report is empty because no Claude session files or history file were found under ~/.claude."
+      ]);
   report.machineOptions = buildClaudeMachineOptions(true);
   return report;
 }
@@ -698,8 +831,17 @@ async function buildClaudeLocalReport(monthsBack) {
 async function buildCombinedClaudeReport(monthsBack) {
   const snapshotSources = listClaudeSnapshotSources();
   const availableSources = snapshotSources.filter((source) => source.available);
-  const unavailableSources = snapshotSources.filter((source) => !source.available);
-  const reports = [await buildClaudeReportFromSource(CLAUDE_HOME, os.hostname(), monthsBack)];
+  const unavailableSources = snapshotSources.filter((source) => !source.available).map((source) => ({ ...source }));
+  const reports = [];
+
+  if (hasLocalClaudeData()) {
+    reports.push(await buildClaudeReportFromSource(CLAUDE_HOME, os.hostname(), monthsBack));
+  } else {
+    unavailableSources.unshift({
+      machine: os.hostname(),
+      status: "missing-local-claude-data"
+    });
+  }
 
   for (const source of availableSources) {
     if (source.machine === os.hostname()) {
@@ -1156,7 +1298,13 @@ function buildMachineOptions(includeLocal = true) {
 
   if (includeLocal) {
     const localMachine = os.hostname();
-    options.push({ machine: localMachine, source: "local", available: true });
+    const available = hasLocalCodexData();
+    options.push({
+      machine: localMachine,
+      source: "local",
+      available,
+      status: available ? "ok" : "missing-local-codex-data"
+    });
     seen.add(localMachine);
   }
 
@@ -1370,8 +1518,17 @@ function mergeLocalReports(reports, monthsBack, unavailableSources = []) {
 async function buildCombinedSnapshotReport(monthsBack) {
   const snapshotSources = listSnapshotSources();
   const availableSources = snapshotSources.filter((source) => source.available);
-  const unavailableSources = snapshotSources.filter((source) => !source.available);
-  const reports = [await buildLocalReport(monthsBack)];
+  const unavailableSources = snapshotSources.filter((source) => !source.available).map((source) => ({ ...source }));
+  const reports = [];
+
+  if (hasLocalCodexData()) {
+    reports.push(await buildLocalReport(monthsBack));
+  } else {
+    unavailableSources.unshift({
+      machine: os.hostname(),
+      status: "missing-local-codex-data"
+    });
+  }
 
   for (const source of availableSources) {
     if (source.machine === os.hostname()) {
@@ -1416,9 +1573,20 @@ const server = http.createServer(async (req, res) => {
   const requestUrl = new URL(req.url, `http://${req.headers.host}`);
 
   if (req.method === "GET" && requestUrl.pathname === "/api/health") {
+    const codexSnapshotsAvailable = listSnapshotSources().some((source) => source.available);
+    const claudeSnapshotsAvailable = listClaudeSnapshotSources().some((source) => source.available);
+    const localCodex = hasLocalCodexData();
+    const localClaude = hasLocalClaudeData();
+
     sendJson(res, 200, {
       ok: true,
-      mode: "local"
+      mode: "local",
+      availability: {
+        localCodex,
+        localClaude,
+        anyCodex: localCodex || codexSnapshotsAvailable,
+        anyClaude: localClaude || claudeSnapshotsAvailable
+      }
     });
     return;
   }
@@ -1452,7 +1620,7 @@ const server = http.createServer(async (req, res) => {
     } catch (error) {
       sendJson(res, 500, {
         error: error.message,
-        hint: "Check that local Codex files exist under ~/.codex and can be read."
+        hint: "Check that the selected local data source exists and can be read."
       });
     }
     return;
